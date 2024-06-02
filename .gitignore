@@ -1,3 +1,5 @@
-arl-eegmodels
+arl-eegmodel
 .conda
 __pycache__
+
+data/
