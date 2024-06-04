@@ -4,7 +4,9 @@ import torch.nn.functional as F
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader, TensorDataset
+# import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 class EEGNet(nn.Module):
@@ -133,7 +135,7 @@ def run_simple_eeg_model(train_loader):
         
         print(f'Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader)}')
 
-def run_eeg_model(train_loader, test_loader, train=True, model_path='eegnet.pth', log_dir='runs/eegnet'):
+def run_eeg_model(train_loader, val_loader, test_loader, train=True, model_path='t1t2_eegnet.pth', log_dir='runs/eegnet'):
     net = EEGNet()
     print(net)
     criterion = nn.BCELoss()
@@ -148,7 +150,7 @@ def run_eeg_model(train_loader, test_loader, train=True, model_path='eegnet.pth'
     # Training loop
     if(train):
         print("Training the model")
-        num_epochs = 50
+        num_epochs = 30
         for epoch in range(num_epochs):
             net.train()
             running_acc = 0.0
@@ -174,8 +176,28 @@ def run_eeg_model(train_loader, test_loader, train=True, model_path='eegnet.pth'
             avg_acc = running_acc / len(train_loader)
             writer.add_scalar('Loss/train', avg_loss, epoch)
             writer.add_scalar('Accuracy/train', avg_acc, epoch)
+
+            # Validation
+            net.eval()
+            val_loss = 0.0
+            val_acc = 0.0
+            with torch.no_grad():
+                for inputs, labels in val_loader:
+                    labels = torch.unsqueeze(labels, 1)
+                    outputs = net(inputs)
+                    loss = criterion(outputs, labels)
+                    val_loss += loss.item()
+                    acc = (outputs.round() == labels).float().mean()
+                    val_acc += acc
+
+            avg_val_loss = val_loss / len(val_loader)
+            avg_val_acc = val_acc / len(val_loader)
+            writer.add_scalar('Loss/val', avg_val_loss, epoch)
+            writer.add_scalar('Accuracy/val', avg_val_acc, epoch)
             
-            print(f'Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader)}, Acc: {running_acc/len(train_loader)}')
+            print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {avg_loss}, Train Acc: {avg_acc}, Val Loss: {avg_val_loss}, Val Acc: {avg_val_acc}')
+            
+            # print(f'Epoch {epoch+1}/{num_epochs}, Loss: {running_loss/len(train_loader)}, Acc: {running_acc/len(train_loader)}')
 
         # Save the trained model
         torch.save(net.state_dict(), model_path)
@@ -189,6 +211,10 @@ def run_eeg_model(train_loader, test_loader, train=True, model_path='eegnet.pth'
     test_loss = 0.0
     correct_predictions = 0
     total_samples = 0
+
+    all_labels = []
+    all_predictions = []
+
     with torch.no_grad():
         for inputs, labels in test_loader:
             labels = torch.unsqueeze(labels, 1)
@@ -201,13 +227,26 @@ def run_eeg_model(train_loader, test_loader, train=True, model_path='eegnet.pth'
             correct_predictions += (predictions == labels).sum().item()
             total_samples += labels.size(0)
 
+            # Store all predictions and labels
+            all_labels.extend(labels.cpu().numpy())
+            all_predictions.extend(predictions.cpu().numpy())
+
     avg_test_loss = test_loss / len(test_loader)
     accuracy = correct_predictions / total_samples * 100
     writer.add_scalar('Loss/test', avg_test_loss, 0)
     writer.add_scalar('Accuracy/test', accuracy, 0)
 
-
     print(f'Test Loss: {avg_test_loss}, Accuracy: {accuracy}%')
+
+    # Calculate confusion matrix
+    all_labels = np.array(all_labels).flatten()
+    all_predictions = np.array(all_predictions).flatten()
+    cm = confusion_matrix(all_labels, all_predictions)
+
+    # Print confusion matrix
+    print("Confusion Matrix:")
+    print(cm)
+
     writer.close()
 
 def main():
@@ -215,39 +254,66 @@ def main():
     # X = sample_data[sample_data.columns[3:]]
     # y = sample_data[sample_data.columns[2]]
 
-    full_data = np.load('data/allData.npy', allow_pickle=True)
+    full_data = np.load('data/cleanedData.npy', allow_pickle=True)
+    real_data = np.load('data/real_data.npy')
+    imagined_data = np.load('data/imagined_data.npy')
+    full_data = full_data
+
+    # Create a mask for rows where the label is not 'T0'
+    mask = full_data[:, 1] != 'T0'
+    # Apply the mask to full_data to keep only 'T1' and 'T2'
+    filtered_data = full_data[mask]
+    full_data = filtered_data
+
     print(full_data)
     X = full_data[:, 2:]
     y = full_data[:, 1]
     print(y)
 
-    label_mapping = {'T0': 0, 'T1': 1, 'T2': 1}
+    # label_mapping = {'T0': 0, 'T1': 1, 'T2': 1}
+    label_mapping = {'T1': 0, 'T2': 1}
     y = np.array([label_mapping[label] for label in y])
 
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Split the data into training, validation, and testing sets
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+
     X_train = np.array(X_train, dtype=np.float32)
     y_train = np.array(y_train, dtype=np.float32)
+    X_val = np.array(X_val, dtype=np.float32)
+    y_val = np.array(y_val, dtype=np.float32)
     X_test = np.array(X_test, dtype=np.float32)
     y_test = np.array(y_test, dtype=np.float32)
+
+    # Get the unique classes and their counts
+    classes, counts = np.unique(y_train, return_counts=True)
+
+    # Print the class counts
+    for cls, count in zip(classes, counts):
+        print(f"Class {int(cls)}: {count} samples")
 
     # Convert to PyTorch tensors
     X_train_tensor = torch.tensor(X_train, dtype=torch.float32).unsqueeze(1).unsqueeze(1)
     y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+    X_val_tensor = torch.tensor(X_val, dtype=torch.float32).unsqueeze(1).unsqueeze(1)
+    y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32).unsqueeze(1).unsqueeze(1)
     y_test_tensor = torch.tensor(y_test, dtype=torch.float32)
 
     print("training shape: ", X_train_tensor.shape)
+    print("testing shape: ", X_test_tensor.shape)
 
     # Create DataLoader for training and testing sets
     train_dataset = TensorDataset(X_train_tensor, y_train_tensor)
     test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
+    val_dataset = TensorDataset(X_val_tensor, y_val_tensor)
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
     train_flag = True
     model_path = "" # defaults to eegnet.pth
-    run_eeg_model(train_loader, test_loader, train=train_flag)
+    run_eeg_model(train_loader, val_loader, test_loader, train=train_flag)
     # run_simple_eeg_model(train_loader)
 
 def outputBinaryClass(outputs):
